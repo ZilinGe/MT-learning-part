@@ -51,7 +51,7 @@ class CellFreeMiMoCSIEnv(gym.Env):
             print("[MATLAB PATH]", self.eng.path())
 
         # -------------------- Gym 空间 -------------------- #
-        # 动作：每个 AP 选 {0,4,8} 根天线  -> MultiDiscrete([3]*N_AP)
+        # 动作：每个 AP 输出 {-1,0,+1} (通过离散编码 0/1/2)
         self.action_space = spaces.MultiDiscrete([3] * self.N_AP)
 
         # 观测：CSI( N_AP×N_UE ) + 动作( N_AP ) + 4 个标量特征
@@ -59,75 +59,65 @@ class CellFreeMiMoCSIEnv(gym.Env):
         self.observation_space = spaces.Box(low=-1, high=1, shape=(state_size,), dtype=np.float32)
 
         # -------------------- 上一步缓存 -------------------- #
-        self.prev_action = np.zeros(self.N_AP, dtype=np.int32)   # 直接存根数 0/4/8
+        self.prev_action = np.full(self.N_AP, 8, dtype=np.int32)   # 使用天线根数存储 (0‑8)
         self.prev_SE     = 0.0
         self.prev_Ptot   = 0.0
 
     # ------------------------------------------------------ #
-    # reset()                                                #
-    # ------------------------------------------------------ #
     def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
         super().reset(seed=seed)
-        # 若用户没给 seed，就随机一个并立即生效 (MATLAB 内部根据 seed 放置 UE/AP)
         self.seed = int(seed) if seed is not None else int(self.np_random.integers(0, 2**16))
         self.current_step = 0
 
-        # 初始动作：全部 8 根天线
-        initial_action = np.full(self.N_AP, 8, dtype=np.int32)
-        self.prev_action = initial_action
+        # 初始动作：全部 8 根
+        init_action = np.full(self.N_AP, 8, dtype=np.int32)
+        self.prev_action = init_action
 
-        # 进行一次仿真
-        SE, Ptot, _, CSI, SE_vec = self._simulate(initial_action)
-        outage_cnt = int(np.sum(SE_vec < self.se_thr))
-        reward = self._calc_reward(initial_action, outage_cnt)
+        SE, Ptot, _, CSI, SE_vec = self._simulate(init_action)
+        outage = int(np.sum(SE_vec < self.se_thr))
+        reward = self._calc_reward(init_action, outage)
 
-        # 记录日志
-        self.logger.info(f"[RESET] Action: {initial_action.tolist()}, SE: {SE:.4f}, "
-                         f"Ptot: {Ptot:.2f}, Outage: {outage_cnt}, SE_vec: {np.array2string(SE_vec, precision=3)}")
-
-        # 构造状态
-        state = self._build_state(CSI, initial_action, SE, Ptot, reward, outage_cnt)
+        self.logger.info(f"[RESET] Action {init_action.tolist()} | SE {SE:.4f} | Ptot {Ptot:.1f} | Outage {outage}")
+        state = self._build_state(CSI, init_action, SE, Ptot, reward, outage)
         return state, {}
 
     # ------------------------------------------------------ #
-    # step()                                                 #
-    # ------------------------------------------------------ #
     def step(self, action: np.ndarray):
-        # Gym 可能传 list，这里确保是 ndarray
         action = np.asarray(action, dtype=np.int32)
         assert action.shape == (self.N_AP,), "Action shape mismatch"
 
-        # 将离散动作 0/1/2 映射到 0/4/8 根天线
-        action_mapped = action * 4   # 0->0,1->4,2->8
+        # ---- 将离散动作映射为 Δ天线 {-1,0,+1} ---- #
+        delta = np.where(action == 0, -1, np.where(action == 1, 0, 1))
+        new_action = np.clip(self.prev_action + delta, 0, 8)
 
-        # 仿真
-        SE, Ptot, _, CSI, SE_vec = self._simulate(action_mapped)
-        outage_cnt = int(np.sum(SE_vec < self.se_thr))
-        reward = self._calc_reward(action_mapped, outage_cnt)
+        # ---- 无效动作惩罚：尝试越界但被 clip 回来 ---- #
+        invalid_mask = (new_action == self.prev_action) & (delta != 0)
+        invalid_penalty = 0.05 * np.sum(invalid_mask)
 
-        # 构造状态
-        state = self._build_state(CSI, action_mapped, SE, Ptot, reward, outage_cnt)
+        # ---- MATLAB 仿真 ---- #
+        SE, Ptot, _, CSI, SE_vec = self._simulate(new_action)
+        outage = int(np.sum(SE_vec < self.se_thr))
+        reward = self._calc_reward(new_action, outage) - invalid_penalty
 
-        # 更新缓存
-        self.prev_action = action_mapped
+        state = self._build_state(CSI, new_action, SE, Ptot, reward, outage)
+
+        self.prev_action = new_action
         self.prev_SE     = SE
         self.prev_Ptot   = Ptot
         self.current_step += 1
 
-        # 结束条件：仅使用时间截断 (TimeLimit)
         terminated = False
         truncated  = self.current_step >= self.max_steps
-        info = {"SE": SE, "Ptot": Ptot, "Outage": outage_cnt}
+        info = {"SE": SE, "Ptot": Ptot, "Outage": outage, "Invalid": int(invalid_mask.sum())}
         if truncated:
             info["TimeLimit.truncated"] = True
 
         # 日志
         self.logger.info(
-            f"Step {self.current_step:03d} | SE {SE:.3f} | Ptot {Ptot:.1f} | Reward {reward:.3f} | "
-            f"Outage {outage_cnt} | Active {int(action_mapped.sum())}")
+            f"Step {self.current_step:03d} | Δ {delta.tolist()} | Active {int(new_action.sum())} | "
+            f"Invalid {int(invalid_mask.sum())} | Reward {reward:.3f}")
 
         return state, reward, terminated, truncated, info
-
     # ------------------------------------------------------ #
     # 内部工具函数                                           #
     # ------------------------------------------------------ #
