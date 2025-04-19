@@ -1,78 +1,49 @@
 import os
-import time
 from stable_baselines3 import PPO
-from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import BaseCallback
-from environment import CellFreeMiMoCSIEnv  # 确保你的 environment.py 在同一目录
-from datetime import datetime
+from stable_baselines3.common.env_checker import check_env
+from environment import CellFreeMiMoCSIEnv
 
+# ---------- 环境实例，用 check_env 快速 sanity‑check ---------- #
+env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=4, max_steps=256)
+check_env(env, warn=True)
 
-# Tensorborad-------------------------------------------------------------------
-# tensorboard --logdir=./tensorboard_logs/PPO_Training --reload_interval 5
+tb_logdir = "./tensorboard_logs/PPO_run"
+os.makedirs(tb_logdir, exist_ok=True)
 
-# ============================== #
-# 定义训练进度显示的 Callback
-# ============================== #
-class ProgressCallback(BaseCallback):
-    def __init__(self, total_timesteps, print_interval=100, verbose=1):
+model = PPO(
+    "MlpPolicy",
+    env,
+    learning_rate=3e-4,
+    n_steps=256,
+    batch_size=256,
+    ent_coef=0.01,
+    verbose=1,
+    tensorboard_log=tb_logdir,
+    device="cpu",
+)
+
+# ---------- 训练回调：每 10 万步存一次模型 ---------- #
+class SaveEveryCallback(BaseCallback):
+    def __init__(self, save_freq: int, save_path: str, verbose: int = 0):
         super().__init__(verbose)
-        self.total_timesteps = total_timesteps
-        self.print_interval = print_interval
-        self.start_time = time.time()
+        self.save_freq = save_freq
+        self.save_path = save_path
+        os.makedirs(save_path, exist_ok=True)
 
     def _on_step(self) -> bool:
-        step = self.num_timesteps
-        if step % self.print_interval == 0 or step == self.total_timesteps:
-            percent = 100 * step / self.total_timesteps
-            elapsed = time.time() - self.start_time
-            print(f"📊 Progress: {step}/{self.total_timesteps} ({percent:.2f}%) - Elapsed: {elapsed:.1f} sec")
+        if self.num_timesteps % self.save_freq == 0:
+            fname = os.path.join(self.save_path, f"ppo_step_{self.num_timesteps}.zip")
+            self.model.save(fname)
+            if self.verbose:
+                print(f"💾 model saved to {fname}")
         return True
 
-# ============================== #
-# 训练参数配置
-# ============================== #
-# 固定50个种子
-seed_list = [i for i in range(1000, 1050)]
+save_cb = SaveEveryCallback(save_freq=100_000, save_path="./ppo_ckpt", verbose=1)
 
-# 网络设置
-N_AP = 16
-N_UE = 4
+# ---------- 开始训练 ---------- #
+model.learn(total_timesteps=2_000_000, callback=save_cb)
 
-# 每个epoch训练5000步
-steps_per_epoch = 5000
-total_epochs = len(seed_list)
-
-# 保存目录
-current_time = datetime.now().strftime('%Y%m%d-%H%M%S')
-save_dir = f"ppo_checkpoints_v4_ratio/{current_time}/"
-tb_base_dir = f"./tensorboard_logs/PPO_Training/{current_time}/"
-os.makedirs(save_dir, exist_ok=True)
-os.makedirs(tb_base_dir, exist_ok=True)
-
-# ============================== #
-# 开始训练
-# ============================== #
-for epoch_idx, seed in enumerate(seed_list):
-    print(f"\n=== 🚀 Epoch {epoch_idx+1}/{total_epochs} 使用 Seed={seed} 开始训练 ===")
-
-    # 创建环境
-    env = make_vec_env(lambda: CellFreeMiMoCSIEnv(N_AP=N_AP, N_UE=N_UE, seed=seed), n_envs=1)
-
-    # 第一次创建新模型，后面加载上一个epoch的模型继续训练
-    if epoch_idx == 0:
-        model = PPO("MlpPolicy", env, learning_rate=0.01, verbose=1,
-                    tensorboard_log=tb_base_dir, device="cpu")  # 注意用cpu
-    else:
-        model = PPO.load(os.path.join(save_dir, f"ppo_epoch_{epoch_idx}.zip"), env=env, device="cpu")
-
-    # 学习，添加进度回调
-    model.learn(
-        total_timesteps=steps_per_epoch,
-        callback=ProgressCallback(total_timesteps=steps_per_epoch)
-    )
-
-    # 保存本次epoch的模型
-    model.save(os.path.join(save_dir, f"ppo_epoch_{epoch_idx+1}.zip"))
-    print(f"✅ 保存 epoch {epoch_idx+1} 模型成功！")
-
-print("\n🎉 所有种子训练完成！")
+# 训练完，保存最终模型
+model.save("ppo_final.zip")
+print("🎉 Training finished & model saved.")

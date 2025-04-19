@@ -1,214 +1,187 @@
+# =============================== #
+#  environment.py
+# =============================== #
+from __future__ import annotations
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 import matlab.engine
 import os
 import logging
-import time
 from datetime import datetime
+from typing import Tuple, Dict, Any
 
 class CellFreeMiMoCSIEnv(gym.Env):
-    def __init__(self, N_AP, N_UE, seed=123):
+    """Gymnasium 环境 —— Cell‑Free Massive‑MIMO 天线激活优化 (PPO)。"""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self,
+                 N_AP: int,
+                 N_UE: int,
+                 max_steps: int = 256,
+                 se_threshold: float = 7.0,
+                 matlab_proj_path: str | None = None,
+                 matlab_startup_msg: bool = True):
         super().__init__()
 
-        # AP 和 UE 数量
-        self.N_AP = N_AP
-        self.N_UE = N_UE
+        # -------------------- 基本参数 -------------------- #
+        self.N_AP        = int(N_AP)
+        self.N_UE        = int(N_UE)
+        self.max_steps   = int(max_steps)
+        self.se_thr      = float(se_threshold)
+        self.current_step: int = 0
 
-        self.seed = seed
-
-        # 初始化 logger
+        # -------------------- 日志初始化 -------------------- #
         self.logger = logging.getLogger("CellFreeMiMoCSIEnvLogger")
         self.logger.setLevel(logging.INFO)
-
-        # 创建 handler，只创建一次避免重复写入
         if not self.logger.handlers:
-            current_time = datetime.now().strftime('%Y%m%d-%H%M%S')
-            log_dir = f"./env_logs/{current_time}"
+            now = datetime.now().strftime("%Y%m%d-%H%M%S")
+            log_dir = os.path.join("./env_logs", now)
             os.makedirs(log_dir, exist_ok=True)
-            log_file = os.path.join(log_dir, "env_step_log.txt")
-            file_handler = logging.FileHandler(log_file, mode='a')
-            formatter = logging.Formatter('%(asctime)s - %(message)s')
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
+            fh = logging.FileHandler(os.path.join(log_dir, "env_step_log.txt"))
+            fh.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+            self.logger.addHandler(fh)
 
-        print(f"Initial self.N_AP: {self.N_AP}, self.N_UE: {self.N_UE}")
-
-        # 启动 MATLAB 引擎
+        # -------------------- MATLAB 引擎 -------------------- #
         self.eng = matlab.engine.start_matlab()
-        self.eng.addpath(self.eng.genpath(r'C:\Users\asus\Desktop\master\003-master_thesis\002 - 004_dnn'), nargout=0)
-        print("[MATLAB PATH] 当前 MATLAB 路径设置为:")
-        print(self.eng.path())
+        proj_path = matlab_proj_path or r'C:\Users\asus\Desktop\master\003-master_thesis\002 - 004_dnn'
+        self.eng.addpath(self.eng.genpath(proj_path), nargout=0)
+        if matlab_startup_msg:
+            print("[MATLAB PATH]", self.eng.path())
 
-        # 动作空间定义：每个 AP 可以选择的天线数量 (0, 4, 8)
-        self.action_space = spaces.MultiDiscrete([3] * self.N_AP)  # 0: 0 antennas, 1: 4 antennas, 2: 8 antennas
+        # -------------------- Gym 空间 -------------------- #
+        # 动作：每个 AP 选 {0,4,8} 根天线  -> MultiDiscrete([3]*N_AP)
+        self.action_space = spaces.MultiDiscrete([3] * self.N_AP)
 
-        # 状态空间定义：CSI 矩阵 (AP x UE) + 上一步动作 (AP) + 额外特征 (4)
-        state_size = N_AP * N_UE + N_AP + 4
-        self.observation_space = spaces.Box(
-            low=-1, high=1, shape=(state_size,), dtype=np.float32)
+        # 观测：CSI( N_AP×N_UE ) + 动作( N_AP ) + 4 个标量特征
+        state_size = self.N_AP * self.N_UE + self.N_AP + 4
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(state_size,), dtype=np.float32)
 
-        # 奖励权重
-        self.w_SE = 1.0
-        self.w_Ptot = 0.005
+        # -------------------- 上一步缓存 -------------------- #
+        self.prev_action = np.zeros(self.N_AP, dtype=np.int32)   # 直接存根数 0/4/8
+        self.prev_SE     = 0.0
+        self.prev_Ptot   = 0.0
 
-        # 上一步信息（初始化）
-        self.prev_action = np.zeros(self.N_AP)
-        self.prev_SE = 0.0
-        self.prev_Ptot = 0.0
-
-    def reset(self, seed=None):
+    # ------------------------------------------------------ #
+    # reset()                                                #
+    # ------------------------------------------------------ #
+    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
         super().reset(seed=seed)
+        # 若用户没给 seed，就随机一个并立即生效 (MATLAB 内部根据 seed 放置 UE/AP)
+        self.seed = int(seed) if seed is not None else int(self.np_random.integers(0, 2**16))
+        self.current_step = 0
 
-        if seed is not None:
-            self.seed = seed
+        # 初始动作：全部 8 根天线
+        initial_action = np.full(self.N_AP, 8, dtype=np.int32)
+        self.prev_action = initial_action
 
-        # 初始化全部为 8 根天线
-        initial_actions = np.full(self.N_AP, 8)
-        self.prev_action = initial_actions
+        # 进行一次仿真
+        SE, Ptot, _, CSI, SE_vec = self._simulate(initial_action)
+        outage_cnt = int(np.sum(SE_vec < self.se_thr))
+        reward = self._calc_reward(initial_action, outage_cnt)
 
-        # 调用 MATLAB 仿真，获取初始 CSI、SE、Ptot
-        SE, Ptot, _, CSI, SE_results_vec = self._simulate(initial_actions)
+        # 记录日志
+        self.logger.info(f"[RESET] Action: {initial_action.tolist()}, SE: {SE:.4f}, "
+                         f"Ptot: {Ptot:.2f}, Outage: {outage_cnt}, SE_vec: {np.array2string(SE_vec, precision=3)}")
 
-        # 保存历史
-        self.prev_SE = SE
-        self.prev_Ptot = Ptot
-
-        # 计算 outage count
-        threshold = 7
-        outage_count = np.sum(SE_results_vec < threshold)
-
-        # 估算初始 reward（与 step 中一致）
-        total_active_antennas = np.sum(initial_actions)
-        reward = - total_active_antennas / (self.N_AP * 8) - outage_count * 1.0
-
-        # 日志记录
-        SE_results_str = np.array2string(SE_results_vec, precision=3, separator=', ')
-        self.logger.info(f"[RESET] Init Action: {self.prev_action.tolist()}, SE: {SE:.4f}, "
-                         f"Ptot: {Ptot:.2f}, SE_results: {SE_results_str}")
-
-        # 构造状态（与 step 一致）
-        CSI_norm = self._normalize_CSI(CSI)
-        state = np.concatenate([
-            CSI_norm.flatten(),
-            self.prev_action / 16.0,
-            np.array([
-                SE / 10.0,  # 归一化 SE
-                Ptot / 2600.0,  # 归一化 Ptot
-                reward,  # 当前 reward
-                outage_count / self.N_UE  # 归一化 outage count
-            ])
-        ])
-
+        # 构造状态
+        state = self._build_state(CSI, initial_action, SE, Ptot, reward, outage_cnt)
         return state, {}
 
-    def step(self, action):
-        # 确保action总是作为数组处理，即使它是单个数字
-        if not isinstance(action, np.ndarray):
-            action = np.array([action])  # 将单个动作转换为数组
+    # ------------------------------------------------------ #
+    # step()                                                 #
+    # ------------------------------------------------------ #
+    def step(self, action: np.ndarray):
+        # Gym 可能传 list，这里确保是 ndarray
+        action = np.asarray(action, dtype=np.int32)
+        assert action.shape == (self.N_AP,), "Action shape mismatch"
 
-        # 根据动作映射到新的动作值
-        # action_mapped = np.array([0 if x == 0 else 8 for x in action])
-        action_delta = np.array([-1 if x == 0 else 0 if x == 1 else 1 for x in action])
-        # print(action_mapped)
+        # 将离散动作 0/1/2 映射到 0/4/8 根天线
+        action_mapped = action * 4   # 0->0,1->4,2->8
 
-        new_action = np.clip(self.prev_action + action_delta, 0, 8)
+        # 仿真
+        SE, Ptot, _, CSI, SE_vec = self._simulate(action_mapped)
+        outage_cnt = int(np.sum(SE_vec < self.se_thr))
+        reward = self._calc_reward(action_mapped, outage_cnt)
 
-        # 调用 MATLAB 仿真
-        avg_SE, Ptot, _, CSI, SE_results_vec = self._simulate(new_action)
+        # 构造状态
+        state = self._build_state(CSI, action_mapped, SE, Ptot, reward, outage_cnt)
 
-        # 归一化总功率
-        norm_Ptot = (Ptot - 0) / (2600 - 0)
+        # 更新缓存
+        self.prev_action = action_mapped
+        self.prev_SE     = SE
+        self.prev_Ptot   = Ptot
+        self.current_step += 1
 
-        # 计算中断数
-        # 3
-        threshold = 7
-        outage_count = np.sum(SE_results_vec < threshold)
-
-        # 计算奖励
-        weight = 0.6  # 惩罚系数
-        k = self.N_UE  # 可以调整为其他合适的归一化因子
-
-        # 统计总开通天线数（例如：0,2,4,6,8）
-        total_active_antennas = np.sum(new_action)
-
-        # 统计多少个 UE 的 SE 低于阈值
-        outage_count = np.sum(SE_results_vec < threshold)
-
-        reward = - total_active_antennas / (self.N_AP * 8) - outage_count * 1.0
-
-        # 日志记录
-        SE_results_str = np.array2string(SE_results_vec, precision=3, separator=', ')
-        self.logger.info(
-            f"Action Delta: {action_delta.tolist()}, New Action: {new_action.tolist()}, "
-            f"SE: {avg_SE:.4f}, Ptot: {Ptot:.2f}, Reward: {reward:.4f}, "
-            f"Outage Count: {outage_count}, Active Antennas: {total_active_antennas}, "
-            f"SE_results: {SE_results_str}"
-        )
-
-        # 更新状态（与 reset 保持一致结构）
-        CSI_norm = self._normalize_CSI(CSI)
-        state = np.concatenate([
-            CSI_norm.flatten(),
-            new_action / 16.0,
-            np.array([
-                avg_SE / 10.0,  # 归一化 SE
-                Ptot / 2600.0,  # 归一化 Ptot
-                reward,  # 当前 reward
-                outage_count / self.N_UE  # 归一化 outage count
-            ])
-        ])
-
-        # self.prev_action = action_mapped
-        self.prev_action = new_action
-        self.prev_SE = avg_SE
-        self.prev_Ptot = Ptot
-
+        # 结束条件：仅使用时间截断 (TimeLimit)
         terminated = False
-        truncated = False
-        info = {'SE': avg_SE, 'Ptot': Ptot, 'Outage Count': outage_count}
+        truncated  = self.current_step >= self.max_steps
+        info = {"SE": SE, "Ptot": Ptot, "Outage": outage_cnt}
+        if truncated:
+            info["TimeLimit.truncated"] = True
+
+        # 日志
+        self.logger.info(
+            f"Step {self.current_step:03d} | SE {SE:.3f} | Ptot {Ptot:.1f} | Reward {reward:.3f} | "
+            f"Outage {outage_cnt} | Active {int(action_mapped.sum())}")
 
         return state, reward, terminated, truncated, info
 
-    def _simulate(self, action):
-        """调用 MATLAB 进行仿真，并打印输入参数以供检查。"""
+    # ------------------------------------------------------ #
+    # 内部工具函数                                           #
+    # ------------------------------------------------------ #
+    def _build_state(self,
+                     CSI: np.ndarray,
+                     action_mapped: np.ndarray,
+                     SE: float,
+                     Ptot: float,
+                     reward: float,
+                     outage_cnt: int) -> np.ndarray:
+        """将 CSI+动作+标量拼接为一维观测向量并做归一化"""
+        CSI_norm = self._normalize_CSI(CSI)
+        state = np.concatenate([
+            CSI_norm.flatten(),          # (N_AP*N_UE,)
+            action_mapped / 8.0,         # 0/4/8 -> 0/0.5/1
+            np.array([
+                SE / 12.0,              # 经验上 SE<=12
+                Ptot / 2600.0,          # 经验上 Ptot<=2.6 kW
+                reward,                 # 已在 [-2,0] 附近
+                outage_cnt / self.N_UE
+            ], dtype=np.float32)
+        ]).astype(np.float32)
+        return state
+
+    def _calc_reward(self, action_mapped: np.ndarray, outage_cnt: int) -> float:
+        """soft‑penalty 节能 + outage penalty"""
+        active = float(action_mapped.sum())
+        norm_active = active / (self.N_AP * 8)             # ∈ [0,1]
+        energy_pen  = norm_active ** 1.5                   # 加重高功耗区间
+        reward = - energy_pen - outage_cnt / self.N_UE
+        return reward
+
+    def _simulate(self, action_mapped: np.ndarray) -> Tuple[float, float, Any, np.ndarray, np.ndarray]:
+        """调用 MATLAB `simulateConfig` 函数。"""
         try:
-            # 将动作转换为MATLAB双精度类型
-            # N_ap_matlab = matlab.double(action.reshape(-1, 1).tolist())
-            N_ap_matlab = matlab.double(action.reshape(-1, 1).tolist())
-            # print(f"Calling MATLAB simulateConfig with: N_AP={N_ap_matlab}")
-
-            # 打印传递给MATLAB函数的参数
-            # print(f"Calling MATLAB simulateConfig with: N_AP={self.N_AP}, N_UE={self.N_UE}, Action={action.tolist()}")
-
-            # 调用MATLAB函数
-            SE_results, SE_mean, Ptot_results, avg_N_ap, gainOverNoisedB = self.eng.simulateConfig(
+            N_ap_matlab = matlab.double(action_mapped.reshape(-1, 1).tolist())
+            SE_vec, SE_mean, Ptot, avg_N_ap, gainOverNoisedB = self.eng.simulateConfig(
                 N_ap_matlab,
-                matlab.double(self.N_AP),
-                matlab.double(self.N_UE),
-                matlab.double(self.seed),
-                nargout=5
-            )
-
-            # 将MATLAB返回的结果转换为Python可用的格式
-            SE_results_np = np.array(SE_results).flatten()
-            SE = float(SE_mean)
-            Ptot = float(Ptot_results)
-            CSI = np.array(gainOverNoisedB, dtype=np.float32)
-
-            return SE, Ptot, avg_N_ap, CSI, SE_results_np
+                float(self.N_AP),
+                float(self.N_UE),
+                float(self.seed),
+                nargout=5)
+            SE_vec_np = np.array(SE_vec).flatten()
+            CSI_np    = np.array(gainOverNoisedB, dtype=np.float32)
+            return float(SE_mean), float(Ptot), avg_N_ap, CSI_np, SE_vec_np
         except matlab.engine.MatlabExecutionError as e:
-            print(f"MATLAB执行错误：{str(e)}")
-            # 可以在这里添加额外的错误处理逻辑
+            self.logger.error(f"MATLAB error: {e}")
             raise
 
-    def _normalize_CSI(self, CSI):
-        """ CSI 数据标准化，防止数值不稳定 """
-        CSI_mean = np.mean(CSI)
-        CSI_std = np.std(CSI) + 1e-8
-        CSI_norm = (CSI - CSI_mean) / CSI_std
-        return CSI_norm
+    @staticmethod
+    def _normalize_CSI(CSI: np.ndarray) -> np.ndarray:
+        mean = CSI.mean()
+        std  = CSI.std() + 1e-8
+        return (CSI - mean) / std
 
     def close(self):
         self.eng.quit()
-
