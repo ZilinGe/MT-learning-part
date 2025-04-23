@@ -1,4 +1,3 @@
-
 import os
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
@@ -6,14 +5,14 @@ from stable_baselines3.common.env_checker import check_env
 from environment import CellFreeMiMoCSIEnv
 
 # ---------- 环境实例，用 check_env 快速 sanity‑check ---------- #
-env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=4, max_steps=256)
+env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=4, max_steps=256, se_threshold=3.0)
 check_env(env, warn=True)
 
 tb_logdir = "./tensorboard_logs/PPO_run"
 os.makedirs(tb_logdir, exist_ok=True)
 
 model = PPO(
-    "MlpPolicy",
+    "MlpPolicy",  # fully connected NN
     env,
     learning_rate=3e-4,
     n_steps=256,
@@ -23,6 +22,7 @@ model = PPO(
     tensorboard_log=tb_logdir,
     device="cpu",
 )
+
 
 # ---------- 训练回调：每 10 万步存一次模型 ---------- #
 class SaveEveryCallback(BaseCallback):
@@ -40,10 +40,11 @@ class SaveEveryCallback(BaseCallback):
                 print(f"💾 model saved to {fname}")
         return True
 
-save_cb = SaveEveryCallback(save_freq=100_000, save_path="./ppo_ckpt", verbose=1)
+
+save_cb = SaveEveryCallback(save_freq=50_000, save_path="./ppo_ckpt", verbose=1)
 
 # ---------- 开始训练 ---------- #
-model.learn(total_timesteps=2_000_000, callback=save_cb)
+model.learn(total_timesteps=400_000, callback=save_cb)
 
 # 训练完，保存最终模型
 model.save("ppo_final.zip")
