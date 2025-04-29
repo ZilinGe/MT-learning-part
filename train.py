@@ -44,7 +44,7 @@ class SaveEveryCallback(BaseCallback):
 save_cb = SaveEveryCallback(save_freq=50_000, save_path="./ppo_ckpt", verbose=1)
 
 # ---------- 开始训练 ---------- #
-model.learn(total_timesteps=400_000, callback=save_cb)
+model.learn(total_timesteps=300_000, callback=save_cb)
 
 # 训练完，保存最终模型
 model.save("ppo_final.zip")

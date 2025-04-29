@@ -81,7 +81,8 @@ class CellFreeMiMoCSIEnv(gym.Env):
 
         SE, Ptot, _, CSI, SE_vec = self._simulate(init_action)
         outage = int(np.sum(SE_vec < self.se_thr))
-        reward = self._calc_reward(init_action, outage)
+        # reward = self._calc_reward(init_action, outage)
+        reward = self._calc_reward(Ptot, outage)  # 传 Ptot
 
         # self.logger.info(f"[RESET] Action {init_action.tolist()} | SE {SE:.4f} | Ptot {Ptot:.1f} | Outage {outage}")
         self.logger.info(
@@ -119,7 +120,12 @@ class CellFreeMiMoCSIEnv(gym.Env):
         # ---- MATLAB 仿真 ---- #
         SE, Ptot, _, CSI, SE_vec = self._simulate(new_action)
         outage = int(np.sum(SE_vec < self.se_thr))
-        reward = self._calc_reward(new_action, outage) - invalid_penalty - invalid_penalty_extra
+        # reward = self._calc_reward(new_action, outage) - invalid_penalty - invalid_penalty_extra
+        reward = (
+                self._calc_reward(Ptot, outage)  # <-- 传 Ptot
+                - invalid_penalty
+                - invalid_penalty_extra
+        )
 
         state = self._build_state(CSI, new_action, SE, Ptot, reward, outage)
 
@@ -168,12 +174,27 @@ class CellFreeMiMoCSIEnv(gym.Env):
         ]).astype(np.float32)
         return state
 
-    def _calc_reward(self, action_mapped: np.ndarray, outage_cnt: int) -> float:
-        """soft‑penalty 节能 + outage penalty"""
-        active = float(action_mapped.sum())
-        norm_active = active / (self.N_AP * 8)  # ∈ [0,1]
-        energy_pen = norm_active ** 1.5  # 加重高功耗区间
-        reward = - energy_pen - outage_cnt / self.N_UE
+    # def _calc_reward(self, action_mapped: np.ndarray, outage_cnt: int) -> float:
+    #     """soft‑penalty 节能 + outage penalty"""
+    #     active = float(action_mapped.sum())
+    #     norm_active = active / (self.N_AP * 8)  # ∈ [0,1]
+    #     energy_pen = norm_active ** 1.5  # 加重高功耗区间
+    #     reward = - energy_pen - outage_cnt / self.N_UE
+    #     return reward
+
+    def _calc_reward(self, Ptot: float, outage_cnt: int) -> float:
+        """
+        奖励 = - 能耗惩罚 - 掉线惩罚
+        Ptot  : MATLAB 返回的总功率 (W)
+        """
+        # ---------- 能耗惩罚 ----------
+        # 根据经验 Ptot ≈ 0–2600 W，可自行调整上限
+        norm_Ptot = Ptot / 2600.0  # [0,1] 之间
+        energy_pen = norm_Ptot # 1.2 次幂 → 轻微凸函数
+        # ---------- 掉线惩罚 ----------
+        outage_pen = outage_cnt / self.N_UE
+        # ---------- 汇总 ----------
+        reward = - energy_pen - outage_pen
         return reward
 
     def _simulate(self, action_mapped: np.ndarray) -> Tuple[float, float, Any, np.ndarray, np.ndarray]:
