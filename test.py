@@ -20,9 +20,10 @@ print(N_ap_matlab)
 
 N_AP = 16
 N_UE = 4
+Seed = 123
 
 SE_results, SE_mean, Ptot_results, avg_N_ap, gainOverNoisedB =eng.simulateConfig(
-            N_ap_matlab, matlab.double(N_AP), matlab.double(N_UE), nargout=5
+            N_ap_matlab, matlab.double(N_AP), matlab.double(N_UE),matlab.double(Seed), nargout=5
         )
 
 

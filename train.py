@@ -5,7 +5,7 @@ from stable_baselines3.common.env_checker import check_env
 from environment import CellFreeMiMoCSIEnv
 
 # ---------- 环境实例，用 check_env 快速 sanity‑check ---------- #
-env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=4, max_steps=256, se_threshold=3.0)
+env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=8, max_steps=256, se_threshold=3.0)
 check_env(env, warn=True)
 
 tb_logdir = "./tensorboard_logs/PPO_run"
@@ -33,15 +33,20 @@ class SaveEveryCallback(BaseCallback):
         os.makedirs(save_path, exist_ok=True)
 
     def _on_step(self) -> bool:
+        # 每 save_freq 步保存一次模型
         if self.num_timesteps % self.save_freq == 0:
             fname = os.path.join(self.save_path, f"ppo_step_{self.num_timesteps}.zip")
             self.model.save(fname)
             if self.verbose:
                 print(f"💾 model saved to {fname}")
+
+        # 每 1000 步打印一次当前步数
+        if self.num_timesteps % 1000 == 0:
+            print(f"🧮 Current timesteps: {self.num_timesteps}")
+
         return True
 
-
-save_cb = SaveEveryCallback(save_freq=50_000, save_path="./ppo_ckpt", verbose=1)
+save_cb = SaveEveryCallback(save_freq=10_000, save_path="./ppo_ckpt", verbose=1)
 
 # ---------- 开始训练 ---------- #
 model.learn(total_timesteps=300_000, callback=save_cb)

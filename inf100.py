@@ -12,7 +12,7 @@ model = PPO.load(model_path, device="cpu")
 # ---------- 2. 创建环境 ----------
 env = CellFreeMiMoCSIEnv(
     N_AP=16,
-    N_UE=4,
+    N_UE=8,
     max_steps=256,
     se_threshold=3.0
 )
