@@ -10,11 +10,11 @@ from environment import CellFreeMiMoCSIEnv
 # ============ 参数 ============
 total_target_steps = 300_000
 ckpt_dir = Path("./ppo_ckpt")   # 如果检查点也在别处，改这里
-tb_logdir = r"C:\Users\asus\Desktop\master\MasterThesis_learningpart\tensorboard_logs\PPO_run\PPO_11"
+tb_logdir = r"C:\Users\asus\Desktop\master\MasterThesis_learningpart\tensorboard_logs\PPO_run\PPO_13"
 device = "cpu"                  # 或 "cuda"
 
 # ============ 环境 ============
-env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=8, max_steps=256, se_threshold=3.0)
+env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=4, max_steps=256, se_threshold=3.0)
 
 # ============ 回调 ============
 class SaveEveryCallback(BaseCallback):

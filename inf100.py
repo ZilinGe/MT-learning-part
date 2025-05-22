@@ -107,12 +107,16 @@ def run_multiple_inference(model_path, N_UE, se_threshold, log_dir):
 
 if __name__ == "__main__":
     model_list = find_models(BASE_DIR)
+    inference_root_dir = os.path.join(os.getcwd(), "inference_logs")
+    os.makedirs(inference_root_dir, exist_ok=True)
 
     for folder_name, model_path in model_list:
         try:
             print(f"\n\n💼 开始处理模型：{folder_name}")
             N_UE, se_thr = parse_folder_name(folder_name)
-            log_dir = os.path.join(BASE_DIR, folder_name, "inference_log")
+            # 日志目录
+            log_dir = os.path.join(inference_root_dir, folder_name)
+
             run_multiple_inference(model_path, N_UE, se_thr, log_dir)
         except Exception as e:
             print(f"❌ 处理失败：{folder_name}：{e}")

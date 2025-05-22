@@ -10,6 +10,11 @@ import os
 import logging
 from datetime import datetime
 from typing import Tuple, Dict, Any
+import math
+
+
+
+OUTAGE_PENALTY_SCALE = 10.0
 
 
 class CellFreeMiMoCSIEnv(gym.Env):
@@ -56,7 +61,7 @@ class CellFreeMiMoCSIEnv(gym.Env):
         self.action_space = spaces.MultiDiscrete([3] * self.N_AP)
 
         # 观测：CSI( N_AP×N_UE ) + 动作( N_AP ) + 4 个标量特征
-        state_size = self.N_AP * self.N_UE + self.N_AP + 4
+        state_size = self.N_AP * self.N_UE + self.N_AP + 3
         # self.observation_space = spaces.Box(low=-1, high=1, shape=(state_size,), dtype=np.float32)
 
         self.observation_space = spaces.Box(
@@ -91,7 +96,7 @@ class CellFreeMiMoCSIEnv(gym.Env):
             f"SE_results: {[round(float(x), 3) for x in SE_vec]}"
         )
 
-        state = self._build_state(CSI, init_action, SE, Ptot, reward, outage)
+        state = self._build_state(CSI, init_action, Ptot, reward, outage)
         return state, {}
 
     # ------------------------------------------------------ #
@@ -126,8 +131,9 @@ class CellFreeMiMoCSIEnv(gym.Env):
                 - invalid_penalty
                 - invalid_penalty_extra
         )
+        # TODO remove SE
 
-        state = self._build_state(CSI, new_action, SE, Ptot, reward, outage)
+        state = self._build_state(CSI, new_action, Ptot, reward, outage)
 
         self.prev_action = new_action
         self.prev_SE = SE
@@ -153,10 +159,11 @@ class CellFreeMiMoCSIEnv(gym.Env):
     # ------------------------------------------------------ #
     # 内部工具函数                                           #
     # ------------------------------------------------------ #
+
+
     def _build_state(self,
                      CSI: np.ndarray,
                      action_mapped: np.ndarray,
-                     SE: float,
                      Ptot: float,
                      reward: float,
                      outage_cnt: int) -> np.ndarray:
@@ -166,7 +173,7 @@ class CellFreeMiMoCSIEnv(gym.Env):
             CSI_norm.flatten(),  # (N_AP*N_UE,)4-16 16*16 mask  16*4
             action_mapped / 8.0,  # 0/4/8 -> 0/0.5/1
             np.array([
-                SE / 12.0,  # 经验上 SE<=12
+                # SE / 12.0,  # 经验上 SE<=12
                 Ptot / 2600.0,  # 经验上 Ptot<=2.6 kW
                 reward,  # 已在 [-2,0] 附近
                 outage_cnt / self.N_UE
@@ -182,17 +189,22 @@ class CellFreeMiMoCSIEnv(gym.Env):
     #     reward = - energy_pen - outage_cnt / self.N_UE
     #     return reward
 
+
     def _calc_reward(self, Ptot: float, outage_cnt: int) -> float:
         """
-        奖励 = - 能耗惩罚 - 掉线惩罚
-        Ptot  : MATLAB 返回的总功率 (W)
+        奖励 = - 能耗惩罚 - Outage(log)惩罚
+        其中 outage_pen = OUTAGE_PENALTY_SCALE * log10(outage_cnt + 1)
+        只要 outage_cnt > 0 就立即产生较大惩罚
         """
         # ---------- 能耗惩罚 ----------
-        # 根据经验 Ptot ≈ 0–2600 W，可自行调整上限
-        norm_Ptot = Ptot / 2600.0  # [0,1] 之间
-        energy_pen = norm_Ptot # 1.2 次幂 → 轻微凸函数
-        # ---------- 掉线惩罚 ----------
-        outage_pen = outage_cnt / self.N_UE
+        norm_Ptot = Ptot / 2600.0  # ∈[0,1]
+        energy_pen = norm_Ptot
+
+        # ---------- Outage(log)惩罚 ----------
+        outage_pen = 0.0
+        if outage_cnt > 0:
+            outage_pen = OUTAGE_PENALTY_SCALE * math.log10(outage_cnt + 1)
+
         # ---------- 汇总 ----------
         reward = - energy_pen - outage_pen
         return reward
@@ -222,3 +234,27 @@ class CellFreeMiMoCSIEnv(gym.Env):
 
     def close(self):
         self.eng.quit()
+
+
+    # def _calc_reward(self, action_mapped: np.ndarray, outage_cnt: int) -> float:
+    #     """soft‑penalty 节能 + outage penalty"""
+    #     active = float(action_mapped.sum())
+    #     norm_active = active / (self.N_AP * 8)  # ∈ [0,1]
+    #     energy_pen = norm_active ** 1.5  # 加重高功耗区间
+    #     reward = - energy_pen - outage_cnt / self.N_UE
+    #     return reward
+
+    # def _calc_reward(self, Ptot: float, outage_cnt: int) -> float:
+    #     """
+    #     奖励 = - 能耗惩罚 - 掉线惩罚
+    #     Ptot  : MATLAB 返回的总功率 (W)
+    #     """
+    #     # ---------- 能耗惩罚 ----------
+    #     # 根据经验 Ptot ≈ 0–2600 W，可自行调整上限
+    #     norm_Ptot = Ptot / 2600.0  # [0,1] 之间
+    #     energy_pen = norm_Ptot # 1.2 次幂 → 轻微凸函数
+    #     # ---------- 掉线惩罚 ----------
+    #     outage_pen = outage_cnt / self.N_UE
+    #     # ---------- 汇总 ----------
+    #     reward = - energy_pen - outage_pen
+    #     return reward

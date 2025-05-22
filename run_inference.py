@@ -6,7 +6,7 @@ from stable_baselines3 import PPO
 from environment import CellFreeMiMoCSIEnv
 
 # ---------- 1. 载入模型 ----------
-model_path = os.path.join("ppo_ckpt", "ppo_step_300000.zip")
+model_path = os.path.join("ppo_ckpt", "4ue-se3.zip")
 model = PPO.load(model_path, device="cpu")
 
 # ---------- 2. 创建环境 ----------
@@ -14,7 +14,7 @@ env = CellFreeMiMoCSIEnv(
     N_AP=16,
     N_UE=4,
     max_steps=256,
-    se_threshold=3.0
+    se_threshold=1.0
 )
 
 log_time = datetime.now().strftime("%Y%m%d-%H%M%S")

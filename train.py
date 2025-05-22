@@ -5,7 +5,7 @@ from stable_baselines3.common.env_checker import check_env
 from environment import CellFreeMiMoCSIEnv
 
 # ---------- 环境实例，用 check_env 快速 sanity‑check ---------- #
-env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=8, max_steps=256, se_threshold=3.0)
+env = CellFreeMiMoCSIEnv(N_AP=16, N_UE=4, max_steps=256, se_threshold=3.0)
 check_env(env, warn=True)
 
 tb_logdir = "./tensorboard_logs/PPO_run"
